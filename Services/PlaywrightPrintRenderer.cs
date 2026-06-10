@@ -39,6 +39,7 @@ public sealed class PlaywrightPrintRenderer(
 			cancellationToken.ThrowIfCancellationRequested();
 
 			bool isLandscape = request.PrintFormat.Equals("LANDSCAPE", StringComparison.OrdinalIgnoreCase);
+
 			PagePdfOptions options = new()
 			{
 				Format = "Letter",
@@ -49,10 +50,10 @@ public sealed class PlaywrightPrintRenderer(
 				FooterTemplate = request.FooterHtml ?? "<span/>",
 				Margin = new Margin
 				{
-					Top = "1.10in",
-					Bottom = "0.50in",
-					Left = "0.20in",
-					Right = "0.20in"
+					Top = request.MarginTop,
+					Bottom = request.MarginBottom,
+					Left = request.MarginLeft,
+					Right = request.MarginRight
 				}
 			};
 

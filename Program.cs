@@ -4,7 +4,6 @@ using Microsoft.OpenApi.Models;
 
 using Serilog;
 
-
 AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
 {
 	Console.WriteLine($"UNHANDLED EXCEPTION: {e.ExceptionObject}");
@@ -14,6 +13,8 @@ AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
 Serilog.Debugging.SelfLog.Enable(msg => System.Diagnostics.Debug.WriteLine(msg));
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+
+builder.Host.UseWindowsService();
 
 builder.Host.UseSerilog((ctx, services, lc) =>
 	lc.ReadFrom.Configuration(ctx.Configuration)
@@ -36,7 +37,6 @@ builder.Services.AddSingleton<PlaywrightPrintRenderer>();
 
 WebApplication app = builder.Build();
 
-app.UseSwagger();
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
