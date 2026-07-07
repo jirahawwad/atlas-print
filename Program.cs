@@ -4,44 +4,49 @@ using Microsoft.OpenApi.Models;
 
 using Serilog;
 
-AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
+try
 {
-	Console.WriteLine($"UNHANDLED EXCEPTION: {e.ExceptionObject}");
-	Console.ReadKey();
-};
+	AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
+	{
+		Console.WriteLine($"UNHANDLED EXCEPTION: {e.ExceptionObject}");
+		Console.ReadKey();
+	};
 
-Serilog.Debugging.SelfLog.Enable(msg => System.Diagnostics.Debug.WriteLine(msg));
+	Serilog.Debugging.SelfLog.Enable(msg => System.Diagnostics.Debug.WriteLine(msg));
 
-WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+	WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+	builder.Host.UseWindowsService();
+	builder.Host.UseSerilog((ctx, services, lc) =>
+		lc.ReadFrom.Configuration(ctx.Configuration)
+		  .ReadFrom.Services(services)
+		  .Enrich.FromLogContext()
+		  .Enrich.WithThreadId()
+		  .Enrich.WithProcessId());
 
-builder.Host.UseWindowsService();
+	builder.Services.AddControllers();
+	builder.Services.AddEndpointsApiExplorer();
+	builder.Services.AddSwaggerGen(c =>
+	{
+		c.SwaggerDoc("v1", new OpenApiInfo { Title = "Atlas.Print API", Version = "v1" });
+	});
 
-builder.Host.UseSerilog((ctx, services, lc) =>
-	lc.ReadFrom.Configuration(ctx.Configuration)
-	  .ReadFrom.Services(services)
-	  .Enrich.FromLogContext()
-	  .Enrich.WithThreadId()
-	  .Enrich.WithProcessId());
+	builder.Services.AddSingleton<BrowserPool>();
+	builder.Services.AddSingleton<IBrowserPool>(sp => sp.GetRequiredService<BrowserPool>());
+	builder.Services.AddHostedService(sp => sp.GetRequiredService<BrowserPool>());
+	builder.Services.AddSingleton<PlaywrightPrintRenderer>();
 
-builder.Services.AddControllers();
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen(c =>
+	WebApplication app = builder.Build();
+	app.UseSwagger();
+	app.UseSwaggerUI(c =>
+	{
+		c.SwaggerEndpoint("/swagger/v1/swagger.json", "Atlas.Print API V1");
+	});
+
+	app.MapControllers();
+	app.Run();
+}
+catch (Exception ex)
 {
-	c.SwaggerDoc("v1", new OpenApiInfo { Title = "Atlas.Print API", Version = "v1" });
-});
-
-builder.Services.AddSingleton<BrowserPool>();
-builder.Services.AddSingleton<IBrowserPool>(sp => sp.GetRequiredService<BrowserPool>());
-builder.Services.AddHostedService(sp => sp.GetRequiredService<BrowserPool>());
-builder.Services.AddSingleton<PlaywrightPrintRenderer>();
-
-WebApplication app = builder.Build();
-
-app.UseSwagger();
-app.UseSwaggerUI(c =>
-{
-	c.SwaggerEndpoint("/swagger/v1/swagger.json", "Atlas.Print API V1");
-});
-
-app.MapControllers();
-app.Run();
+	Console.WriteLine($"FATAL STARTUP ERROR: {ex}");
+	Console.ReadLine();
+}
