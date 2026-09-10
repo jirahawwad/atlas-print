@@ -3,8 +3,11 @@ using Atlas.Print.Domain;
 using Microsoft.Playwright;
 
 namespace Atlas.Print.Services;
+
 /// <summary>
-/// Renders HTML to PDF using Playwright/Chromium.
+/// Renders HTML to PDF using Playwright/Chromium. Acquires a page from the shared
+/// <see cref="IBrowserPool"/> per request, lays out and captures the given HTML at
+/// the target page size, and returns the result as a Base64-encoded PDF.
 /// </summary>
 public sealed class PlaywrightPrintRenderer(
 	IBrowserPool browserPool,
@@ -12,9 +15,20 @@ public sealed class PlaywrightPrintRenderer(
 {
 	private readonly IBrowserPool _browserPool = browserPool;
 	private readonly ILogger<PlaywrightPrintRenderer> _logger = logger;
+
 	/// <summary>
 	/// Renders the given <see cref="PrintRequest"/> to a Base64-encoded PDF.
 	/// </summary>
+	/// <remarks>
+	/// The page's viewport is sized to the target print format and Chromium's screen
+	/// (not print) media is explicitly emulated before capture — this makes layout-
+	/// sensitive CSS (percentage widths, viewport units, table auto-layout) behave the
+	/// same way it would in a normal browser tab, rather than however Chromium's
+	/// internal print-media layout pass would compute it.
+	/// </remarks>
+	/// <exception cref="OperationCanceledException">
+	/// Thrown if <paramref name="cancellationToken"/> is cancelled before or during rendering.
+	/// </exception>
 	public async Task<string> RenderAsync(
 		PrintRequest request,
 		CancellationToken cancellationToken = default)
@@ -33,6 +47,9 @@ public sealed class PlaywrightPrintRenderer(
 			int targetWidth = isLandscape ? 1056 : 816;
 			int targetHeight = isLandscape ? 816 : 1056;
 
+			// Size the viewport to the target page dimensions before content loads,
+			// so percentage/viewport-relative CSS resolves against the same
+			// dimensions the PDF will actually be captured at.
 			await page.SetViewportSizeAsync(targetWidth, targetHeight);
 
 			await page.SetContentAsync(request.HtmlPayload, new PageSetContentOptions
@@ -42,6 +59,9 @@ public sealed class PlaywrightPrintRenderer(
 
 			cancellationToken.ThrowIfCancellationRequested();
 
+			// Force screen-media layout instead of Chromium's default print-media
+			// layout pass for page.PdfAsync() — gives more predictable, "what you'd
+			// see in a browser tab" sizing for tables/percentage widths.
 			await page.EmulateMediaAsync(new PageEmulateMediaOptions
 			{
 				Media = Media.Screen
@@ -53,8 +73,10 @@ public sealed class PlaywrightPrintRenderer(
 				Landscape = isLandscape,
 				Scale = 1.0f,
 				PrintBackground = true,
-				// CHANGED TO FALSE: Tells Playwright to prioritize our explicit Format and Margins 
-				// over un-declared system CSS @page rules, eliminating margin clipping math errors.
+				// False so Playwright always honors our explicit Format/Margin values
+				// below rather than deferring to any (possibly absent or conflicting)
+				// CSS @page rule in the rendered HTML — avoids margin/clipping
+				// mismatches when the HTML doesn't declare @page explicitly.
 				PreferCSSPageSize = false,
 				DisplayHeaderFooter = true,
 				HeaderTemplate = request.HeaderHtml ?? "<span/>",
