@@ -4,12 +4,21 @@ using Microsoft.OpenApi.Models;
 
 using Serilog;
 
+IConfiguration bootstrapConfig = new ConfigurationBuilder()
+	.AddJsonFile("appsettings.json", optional: true)
+	.AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")}.json", optional: true)
+	.AddEnvironmentVariables()
+	.Build();
+
+Log.Logger = new LoggerConfiguration()
+	.ReadFrom.Configuration(bootstrapConfig)
+	.CreateBootstrapLogger();
+
 try
 {
 	AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
 	{
-		Console.WriteLine($"UNHANDLED EXCEPTION: {e.ExceptionObject}");
-		Console.ReadKey();
+		Log.Fatal(e.ExceptionObject as Exception, "Unhandled exception — terminating: {IsTerminating}", e.IsTerminating);
 	};
 
 	Serilog.Debugging.SelfLog.Enable(msg => System.Diagnostics.Debug.WriteLine(msg));
@@ -36,17 +45,28 @@ try
 	builder.Services.AddSingleton<PlaywrightPrintRenderer>();
 
 	WebApplication app = builder.Build();
-	app.UseSwagger();
-	app.UseSwaggerUI(c =>
+
+	Log.Information("Atlas.Print starting — EnvironmentName: {EnvironmentName}", app.Environment.EnvironmentName);
+
+	// Swagger only in LOCAL/DEV — DEMO/QA/PROD get nothing registered at all.
+	string[] swaggerAllowedEnvironments = ["LOCAL", "DEV"];
+	if (swaggerAllowedEnvironments.Contains(app.Environment.EnvironmentName, StringComparer.OrdinalIgnoreCase))
 	{
-		c.SwaggerEndpoint("/swagger/v1/swagger.json", "Atlas.Print API V1");
-	});
+		app.UseSwagger();
+		app.UseSwaggerUI(c =>
+		{
+			c.SwaggerEndpoint("/swagger/v1/swagger.json", "Atlas.Print API V1");
+		});
+	}
 
 	app.MapControllers();
 	app.Run();
 }
 catch (Exception ex)
 {
-	Console.WriteLine($"FATAL STARTUP ERROR: {ex}");
-	Console.ReadLine();
+	Log.Fatal(ex, "Atlas.Print failed to start");
+}
+finally
+{
+	Log.CloseAndFlush();
 }
