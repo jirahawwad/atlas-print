@@ -5,5 +5,6 @@ namespace Atlas.Print.Domain;
 /// </summary>
 public sealed class PrintResponse
 {
+	/// <summary>Base64-encoded PDF document.</summary>
 	public required string Base64Document { get; init; }
 }
