@@ -3,7 +3,6 @@ using Atlas.Print.Domain;
 using Microsoft.Playwright;
 
 namespace Atlas.Print.Services;
-
 /// <summary>
 /// Renders HTML to PDF using Playwright/Chromium.
 /// </summary>
@@ -13,7 +12,6 @@ public sealed class PlaywrightPrintRenderer(
 {
 	private readonly IBrowserPool _browserPool = browserPool;
 	private readonly ILogger<PlaywrightPrintRenderer> _logger = logger;
-
 	/// <summary>
 	/// Renders the given <see cref="PrintRequest"/> to a Base64-encoded PDF.
 	/// </summary>
@@ -31,6 +29,12 @@ public sealed class PlaywrightPrintRenderer(
 
 			cancellationToken.ThrowIfCancellationRequested();
 
+			bool isLandscape = request.PrintFormat.Equals("LANDSCAPE", StringComparison.OrdinalIgnoreCase);
+			int targetWidth = isLandscape ? 1056 : 816;
+			int targetHeight = isLandscape ? 816 : 1056;
+
+			await page.SetViewportSizeAsync(targetWidth, targetHeight);
+
 			await page.SetContentAsync(request.HtmlPayload, new PageSetContentOptions
 			{
 				WaitUntil = WaitUntilState.NetworkIdle
@@ -38,13 +42,20 @@ public sealed class PlaywrightPrintRenderer(
 
 			cancellationToken.ThrowIfCancellationRequested();
 
-			bool isLandscape = request.PrintFormat.Equals("LANDSCAPE", StringComparison.OrdinalIgnoreCase);
+			await page.EmulateMediaAsync(new PageEmulateMediaOptions
+			{
+				Media = Media.Screen
+			});
 
 			PagePdfOptions options = new()
 			{
 				Format = "Letter",
 				Landscape = isLandscape,
+				Scale = 1.0f,
 				PrintBackground = true,
+				// CHANGED TO FALSE: Tells Playwright to prioritize our explicit Format and Margins 
+				// over un-declared system CSS @page rules, eliminating margin clipping math errors.
+				PreferCSSPageSize = false,
 				DisplayHeaderFooter = true,
 				HeaderTemplate = request.HeaderHtml ?? "<span/>",
 				FooterTemplate = request.FooterHtml ?? "<span/>",

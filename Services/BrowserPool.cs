@@ -34,7 +34,11 @@ public sealed class BrowserPool : IBrowserPool, IHostedService, IAsyncDisposable
 			throw new InvalidOperationException("BrowserPool has not been initialised.");
 		}
 
-		return await _browser.NewPageAsync();
+		// CHANGED: Removed DeviceScaleFactor completely to stop Chromium from forcing 
+		// sub-pixel rounding translation math down to the vector generation layer.
+		IBrowserContext context = await _browser.NewContextAsync();
+
+		return await context.NewPageAsync();
 	}
 
 	public async ValueTask DisposeAsync()
