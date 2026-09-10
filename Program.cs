@@ -32,6 +32,11 @@ try
 		  .Enrich.WithThreadId()
 		  .Enrich.WithProcessId());
 
+	builder.Services.Configure<HostOptions>(options =>
+	{
+		options.ShutdownTimeout = TimeSpan.FromSeconds(30);
+	});
+
 	builder.Services.AddControllers();
 	builder.Services.AddEndpointsApiExplorer();
 	builder.Services.AddSwaggerGen(c =>
