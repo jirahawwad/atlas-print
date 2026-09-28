@@ -78,4 +78,82 @@
 		</When>
 	</Choose>
 
+	<!-- Custom Inline C# Task to handle Zip and SHA256 together without PowerShell -->
+	<UsingTask TaskName="CreateStructuredZipAndHash" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+		<ParameterGroup>
+			<SourceDirectory ParameterType="System.String" Required="true" />
+			<DestinationZip ParameterType="System.String" Required="true" />
+			<Hash ParameterType="System.String" Output="true" />
+		</ParameterGroup>
+		<Task>
+			<Using Namespace="System.IO" />
+			<Using Namespace="System.IO.Compression" />
+			<Using Namespace="System.Security.Cryptography" />
+			<Code Type="Fragment" Language="cs">
+				<![CDATA[
+				// Create the ZIP archive including the root directory name itself
+				ZipFile.CreateFromDirectory(SourceDirectory, DestinationZip, CompressionLevel.Optimal, includeBaseDirectory: true);
+				
+				// Calculate the SHA256 hash of the generated ZIP file
+				using (var stream = File.OpenRead(DestinationZip))
+				using (var sha = SHA256.Create())
+				{
+					var hashBytes = sha.ComputeHash(stream);
+					Hash = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+				}
+				]]>
+			</Code>
+		</Task>
+	</UsingTask>
+
+	<!-- The Optimized, Native Publish Target -->
+	<Target Name="ZipPublishFolder" AfterTargets="AfterPublish">
+		<PropertyGroup>
+			<!-- Favor the profile's PublishUrl if it exists, otherwise fall back to PublishDir -->
+			<ActualPublishDir Condition="'$(PublishUrl)' != ''">$(PublishUrl)</ActualPublishDir>
+			<ActualPublishDir Condition="'$(PublishUrl)' == ''">$(PublishDir)</ActualPublishDir>
+			<!-- Clean trailing slashes so Path.GetDirectoryName behaves consistently -->
+			<CleanPublishDir>$(ActualPublishDir.TrimEnd('\').TrimEnd('/'))</CleanPublishDir>
+
+			<!-- Get the Environment Dir (e.g., bin\Release\net8.0\publish\dev\) -->
+			<EnvDir>$([System.IO.Path]::GetDirectoryName('$(CleanPublishDir)'))</EnvDir>
+			<EnvDir>$([MSBuild]::EnsureTrailingSlash('$(EnvDir)'))</EnvDir>
+
+			<!-- Get the Top-Level Publish Dir (e.g., bin\Release\net8.0\publish\) -->
+			<TopPublishDir>$([System.IO.Path]::GetDirectoryName($(EnvDir.TrimEnd('\').TrimEnd('/'))))</TopPublishDir>
+			<TopPublishDir>$([MSBuild]::EnsureTrailingSlash('$(TopPublishDir)'))</TopPublishDir>
+
+			<!-- Set output paths into the top-level publish directory -->
+			<ZipFile>$(TopPublishDir)$(Configuration)-$(Version).zip</ZipFile>
+			<MetadataFile>$(TopPublishDir)$(Configuration)-$(Version)-metadata.txt</MetadataFile>
+		</PropertyGroup>
+
+		<!-- 1. Delete old zip and metadata if they exist in the top-level folder -->
+		<Delete Files="$(ZipFile)" Condition="Exists('$(ZipFile)')" />
+		<Delete Files="$(MetadataFile)" Condition="Exists('$(MetadataFile)')" />
+
+		<!-- 2. Create the ZIP (including the version folder) and get its SHA256 hash -->
+		<CreateStructuredZipAndHash SourceDirectory="$(CleanPublishDir)" DestinationZip="$(ZipFile)">
+			<Output TaskParameter="Hash" PropertyName="ZipHash" />
+		</CreateStructuredZipAndHash>
+
+		<!-- 3. Generate Metadata File natively in the top-level folder -->
+		<ItemGroup>
+			<MetadataLines Include="Configuration: $(Configuration)" />
+			<MetadataLines Include="Version: $(Version)" />
+			<MetadataLines Include="BuildTimestampUtc: $([System.DateTime]::UtcNow.ToString('o'))" />
+			<MetadataLines Include="ZipFile: $(Configuration)-$(Version).zip" />
+			<MetadataLines Include="SHA256: $(ZipHash)" />
+		</ItemGroup>
+
+		<WriteLinesToFile File="$(MetadataFile)" Lines="@(MetadataLines)" Overwrite="true" />
+
+		<!-- 4. Clean up ONLY the inner version folder, leaving dev/qa/demo folders intact -->
+		<RemoveDir Directories="$(ActualPublishDir)" />
+
+		<Message Importance="high" Text="[ZipPublishFolder] Success! Created '$(Configuration)-$(Version).zip' containing the root version folder. Cleaned up source files." />
+	</Target>
+
+
+
 </Project>
