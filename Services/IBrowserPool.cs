@@ -12,8 +12,15 @@ namespace Atlas.Print.Services;
 public interface IBrowserPool
 {
 	/// <summary>
-	/// Acquires a new <see cref="IPage"/> from a fresh, isolated browser context.
+	/// Acquires a new <see cref="IPage"/> from a fresh, isolated, page-owned browser context.
 	/// Caller is responsible for closing the page after use.
+	/// Concurrency is internally gated — this call may await until a slot is free.
 	/// </summary>
-	public Task<IPage> AcquirePageAsync();
+	public Task<IPage> AcquirePageAsync(CancellationToken cancellationToken = default);
+
+	/// <summary>
+	/// Releases the concurrency slot held for a page acquired via <see cref="AcquirePageAsync"/>.
+	/// Must be called exactly once per successful acquisition, after the page has been closed.
+	/// </summary>
+	public void ReleasePage();
 }

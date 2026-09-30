@@ -10,7 +10,7 @@ namespace Atlas.Print.Services;
 /// print request acquires its own isolated <see cref="IBrowserContext"/>/<see cref="IPage"/>
 /// from the running browser rather than launching a new browser process per request.
 /// </summary>
-public sealed class BrowserPool(ILogger<BrowserPool> logger) : IBrowserPool, IHostedService, IAsyncDisposable
+public sealed class BrowserPool(ILogger<BrowserPool> logger, IConfiguration configuration) : IBrowserPool, IHostedService, IAsyncDisposable
 {
 	private static readonly string[] _chromiumArgs =
 	[
@@ -21,6 +21,10 @@ public sealed class BrowserPool(ILogger<BrowserPool> logger) : IBrowserPool, IHo
 	];
 
 	private readonly ILogger<BrowserPool> _logger = logger;
+	private const int DefaultMaxConcurrentPages = 4;
+
+	// Bounds how many Chromium pages can be open at once — mirrors Atlas.Report.Print.
+	private readonly SemaphoreSlim _pageSemaphore = CreatePageSemaphore(configuration);
 
 	private IPlaywright? _playwright;
 	private IBrowser? _browser;
@@ -49,10 +53,11 @@ public sealed class BrowserPool(ILogger<BrowserPool> logger) : IBrowserPool, IHo
 		_browser.Disconnected += OnBrowserDisconnected;
 
 		_logger.LogInformation(
-			"BrowserPool|method:{Method}|browserVersion:{BrowserVersion}|connected:{Connected}",
+			"BrowserPool|method:{Method}|browserVersion:{BrowserVersion}|connected:{Connected}|maxConcurrentPages:{MaxConcurrentPages}",
 			nameof(StartAsync),
 			_browser.Version,
-			_browser.IsConnected);
+			_browser.IsConnected,
+			_pageSemaphore.CurrentCount);
 	}
 
 	/// <summary>
@@ -68,7 +73,7 @@ public sealed class BrowserPool(ILogger<BrowserPool> logger) : IBrowserPool, IHo
 	/// <exception cref="InvalidOperationException">
 	/// Thrown if called before <see cref="StartAsync"/> has completed.
 	/// </exception>
-	public async Task<Microsoft.Playwright.IPage> AcquirePageAsync()
+	public async Task<IPage> AcquirePageAsync(CancellationToken cancellationToken = default)
 	{
 		if (_browser is null)
 		{
@@ -84,21 +89,50 @@ public sealed class BrowserPool(ILogger<BrowserPool> logger) : IBrowserPool, IHo
 		}
 
 		Stopwatch sw = Stopwatch.StartNew();
-		int contextsBefore = _browser.Contexts.Count;
 
-		// DeviceScaleFactor intentionally left unset (defaults to 1): an explicit
-		// scale factor here was forcing Chromium's PDF rasterizer to round hairline
-		// (1px) borders up, making them render visibly thicker than declared.
-		IPage page = await _browser.NewPageAsync();
+		await _pageSemaphore.WaitAsync(cancellationToken);
 
-		_logger.LogDebug(
-			"BrowserPool|method:{Method}|contextsBefore:{ContextsBefore}|contextsAfter:{ContextsAfter}|elapsed:{Elapsed}ms",
-			nameof(AcquirePageAsync),
-			contextsBefore,
-			_browser.Contexts.Count,
-			sw.ElapsedMilliseconds);
+		long waitedMs = sw.ElapsedMilliseconds;
 
-		return page;
+		try
+		{
+			int contextsBefore = _browser.Contexts.Count;
+
+			// Page-owned context: closes automatically when the page closes.
+			// NewContextAsync + context.NewPageAsync leaked one context per request,
+			// because callers only close the page (per the IBrowserPool contract).
+			// DeviceScaleFactor intentionally left unset (defaults to 1): an explicit
+			// scale factor here was forcing Chromium's PDF rasterizer to round hairline
+			// (1px) borders up, making them render visibly thicker than declared.
+			IPage page = await _browser.NewPageAsync();
+
+			_logger.LogDebug(
+				"BrowserPool|method:{Method}|contextsBefore:{ContextsBefore}|contextsAfter:{ContextsAfter}|waited:{Waited}ms|freeSlots:{FreeSlots}|elapsed:{Elapsed}ms",
+				nameof(AcquirePageAsync),
+				contextsBefore,
+				_browser.Contexts.Count,
+				waitedMs,
+				_pageSemaphore.CurrentCount,
+				sw.ElapsedMilliseconds);
+
+			return page;
+		}
+		catch
+		{
+			// Release only on failure to acquire — on success the caller owns the
+			// slot and returns it via ReleasePage after closing the page.
+			_pageSemaphore.Release();
+			throw;
+		}
+	}
+
+	/// <summary>
+	/// Releases a concurrency slot after the caller has closed its page.
+	/// Must be called exactly once per successful <see cref="AcquirePageAsync"/> call.
+	/// </summary>
+	public void ReleasePage()
+	{
+		_pageSemaphore.Release();
 	}
 
 	/// <summary>
@@ -118,6 +152,22 @@ public sealed class BrowserPool(ILogger<BrowserPool> logger) : IBrowserPool, IHo
 		_playwright?.Dispose();
 	}
 
+	private static SemaphoreSlim CreatePageSemaphore(IConfiguration configuration)
+	{
+		ArgumentNullException.ThrowIfNull(configuration);
+
+		int maxConcurrentPages = configuration.GetValue<int?>("Playwright:MaxConcurrentPages")
+			?? DefaultMaxConcurrentPages;
+
+		if (maxConcurrentPages < 1)
+		{
+			throw new InvalidOperationException(
+				$"Playwright:MaxConcurrentPages must be at least 1 (was {maxConcurrentPages}).");
+		}
+
+		return new SemaphoreSlim(maxConcurrentPages, maxConcurrentPages);
+	}
+
 	private void OnBrowserDisconnected(object? sender, IBrowser browser)
 	{
 		_logger.LogCritical(
@@ -125,4 +175,5 @@ public sealed class BrowserPool(ILogger<BrowserPool> logger) : IBrowserPool, IHo
 			nameof(OnBrowserDisconnected),
 			"BrowserDisconnected");
 	}
+
 }

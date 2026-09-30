@@ -48,7 +48,7 @@ public sealed class PlaywrightPrintRenderer(
 		try
 		{
 			step.Restart();
-			page = await _browserPool.AcquirePageAsync();
+			page = await _browserPool.AcquirePageAsync(cancellationToken);
 			AttachPageDiagnostics(page, renderId);
 			LogStep(renderId, "AcquirePage", step);
 
@@ -145,9 +145,32 @@ public sealed class PlaywrightPrintRenderer(
 		{
 			if (page is not null)
 			{
-				await page.CloseAsync();
-				LogPageState(renderId, "Released", page, LogLevel.Debug);
+				await ReleasePageAsync(renderId, page);
 			}
+		}
+	}
+
+	private async Task ReleasePageAsync(string renderId, IPage page)
+	{
+		try
+		{
+			await page.CloseAsync();
+			LogPageState(renderId, "Released", page, LogLevel.Debug);
+		}
+		catch (PlaywrightException ex)
+		{
+			// Swallowed deliberately: a close failure (e.g. dead browser) must not
+			// replace the original render exception propagating from RenderAsync.
+			_logger.LogWarning(
+				ex,
+				"PlaywrightPrintRenderer|method:{Method}|renderId:{RenderId}|reason:{Reason}",
+				nameof(ReleasePageAsync),
+				renderId,
+				"PageCloseFailed");
+		}
+		finally
+		{
+			_browserPool.ReleasePage();
 		}
 	}
 
