@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 using Atlas.Print.Domain;
 
 using Microsoft.Playwright;
@@ -35,11 +37,20 @@ public sealed class PlaywrightPrintRenderer(
 	{
 		cancellationToken.ThrowIfCancellationRequested();
 
+		string renderId = Guid.NewGuid().ToString("N")[..8];
+		Stopwatch total = Stopwatch.StartNew();
+		Stopwatch step = new();
+
+		LogRequestReceived(renderId, request);
+
 		IPage? page = null;
 
 		try
 		{
+			step.Restart();
 			page = await _browserPool.AcquirePageAsync();
+			AttachPageDiagnostics(page, renderId);
+			LogStep(renderId, "AcquirePage", step);
 
 			cancellationToken.ThrowIfCancellationRequested();
 
@@ -50,22 +61,28 @@ public sealed class PlaywrightPrintRenderer(
 			// Size the viewport to the target page dimensions before content loads,
 			// so percentage/viewport-relative CSS resolves against the same
 			// dimensions the PDF will actually be captured at.
+			step.Restart();
 			await page.SetViewportSizeAsync(targetWidth, targetHeight);
+			LogStep(renderId, "SetViewport", step);
 
+			step.Restart();
 			await page.SetContentAsync(request.HtmlPayload, new PageSetContentOptions
 			{
 				WaitUntil = WaitUntilState.NetworkIdle
 			});
+			LogStep(renderId, "SetContent", step);
 
 			cancellationToken.ThrowIfCancellationRequested();
 
 			// Force screen-media layout instead of Chromium's default print-media
 			// layout pass for page.PdfAsync() — gives more predictable, "what you'd
 			// see in a browser tab" sizing for tables/percentage widths.
+			step.Restart();
 			await page.EmulateMediaAsync(new PageEmulateMediaOptions
 			{
 				Media = Media.Screen
 			});
+			LogStep(renderId, "EmulateMedia", step);
 
 			PagePdfOptions options = new()
 			{
@@ -90,13 +107,20 @@ public sealed class PlaywrightPrintRenderer(
 				}
 			};
 
+			LogPageState(renderId, "PrePrint", page, LogLevel.Debug);
+
+			step.Restart();
 			byte[] pdfBytes = await page.PdfAsync(options);
+			LogStep(renderId, "Pdf", step);
+
 			string base64 = Convert.ToBase64String(pdfBytes);
 
 			_logger.LogInformation(
-				"PlaywrightPrintRenderer|method:{Method}|pdfBytes:{PdfBytes}",
+				"PlaywrightPrintRenderer|method:{Method}|renderId:{RenderId}|pdfBytes:{PdfBytes}|elapsed:{Elapsed}ms",
 				nameof(RenderAsync),
-				pdfBytes.Length);
+				renderId,
+				pdfBytes.Length,
+				total.ElapsedMilliseconds);
 
 			return base64;
 		}
@@ -104,9 +128,16 @@ public sealed class PlaywrightPrintRenderer(
 		{
 			_logger.LogError(
 				ex,
-				"PlaywrightPrintRenderer|method:{Method}|reason:{Reason}",
+				"PlaywrightPrintRenderer|method:{Method}|renderId:{RenderId}|reason:{Reason}|elapsed:{Elapsed}ms",
 				nameof(RenderAsync),
-				"RenderFailed");
+				renderId,
+				"RenderFailed",
+				total.ElapsedMilliseconds);
+
+			if (page is not null)
+			{
+				LogPageState(renderId, "Failed", page, LogLevel.Error);
+			}
 
 			throw;
 		}
@@ -115,7 +146,107 @@ public sealed class PlaywrightPrintRenderer(
 			if (page is not null)
 			{
 				await page.CloseAsync();
+				LogPageState(renderId, "Released", page, LogLevel.Debug);
 			}
 		}
+	}
+
+	private void LogRequestReceived(string renderId, PrintRequest request)
+	{
+		_logger.LogDebug(
+			"PlaywrightPrintRenderer|method:{Method}|renderId:{RenderId}|printFormat:{PrintFormat}|htmlLength:{HtmlLength}|headerLength:{HeaderLength}|footerLength:{FooterLength}|margins:{Top}/{Bottom}/{Left}/{Right}",
+			nameof(RenderAsync),
+			renderId,
+			request.PrintFormat,
+			request.HtmlPayload.Length,
+			request.HeaderHtml?.Length ?? 0,
+			request.FooterHtml?.Length ?? 0,
+			request.MarginTop,
+			request.MarginBottom,
+			request.MarginLeft,
+			request.MarginRight);
+	}
+
+	private void LogStep(string renderId, string stepName, Stopwatch step)
+	{
+		_logger.LogDebug(
+			"PlaywrightPrintRenderer|method:{Method}|renderId:{RenderId}|step:{Step}|elapsed:{Elapsed}ms",
+			nameof(RenderAsync),
+			renderId,
+			stepName,
+			step.ElapsedMilliseconds);
+	}
+
+	private void LogPageState(string renderId, string stage, IPage page, LogLevel level)
+	{
+		IBrowser? browser = page.Context.Browser;
+
+		_logger.Log(
+			level,
+			"PlaywrightPrintRenderer|method:{Method}|renderId:{RenderId}|stage:{Stage}|url:{Url}|isClosed:{IsClosed}|browserConnected:{BrowserConnected}|openContexts:{OpenContexts}",
+			nameof(RenderAsync),
+			renderId,
+			stage,
+			page.Url,
+			page.IsClosed,
+			browser?.IsConnected,
+			browser?.Contexts.Count);
+	}
+
+	private void AttachPageDiagnostics(IPage page, string renderId)
+	{
+		page.Crash += (_, _) => OnPageCrashed(renderId);
+		page.FrameNavigated += (_, frame) => OnFrameNavigated(renderId, frame);
+		page.PageError += (_, message) => OnPageScriptError(renderId, message);
+		page.RequestFailed += (_, failedRequest) => OnRequestFailed(renderId, failedRequest);
+	}
+
+	private void OnPageCrashed(string renderId)
+	{
+		_logger.LogError(
+			"PlaywrightPrintRenderer|method:{Method}|renderId:{RenderId}|reason:{Reason}",
+			nameof(OnPageCrashed),
+			renderId,
+			"PageCrashed");
+	}
+
+	private void OnFrameNavigated(string renderId, IFrame frame)
+	{
+		if (frame.ParentFrame is not null)
+		{
+			return;
+		}
+
+		LogLevel level = frame.Url == "about:blank" ? LogLevel.Debug : LogLevel.Warning;
+
+		_logger.Log(
+			level,
+			"PlaywrightPrintRenderer|method:{Method}|renderId:{RenderId}|mainFrameUrl:{Url}",
+			nameof(OnFrameNavigated),
+			renderId,
+			frame.Url);
+	}
+
+	private void OnPageScriptError(string renderId, string message)
+	{
+		_logger.LogWarning(
+			"PlaywrightPrintRenderer|method:{Method}|renderId:{RenderId}|reason:{Reason}|message:{Message}",
+			nameof(OnPageScriptError),
+			renderId,
+			"PageScriptError",
+			message);
+	}
+
+	private void OnRequestFailed(string renderId, IRequest failedRequest)
+	{
+		string url = failedRequest.Url.Length > 200 ? failedRequest.Url[..200] : failedRequest.Url;
+
+		_logger.LogWarning(
+			"PlaywrightPrintRenderer|method:{Method}|renderId:{RenderId}|reason:{Reason}|url:{Url}|failure:{Failure}",
+			nameof(OnRequestFailed),
+			renderId,
+			"ResourceRequestFailed",
+			url,
+			failedRequest.Failure);
 	}
 }

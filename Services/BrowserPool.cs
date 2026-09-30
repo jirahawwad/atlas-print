@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 using Microsoft.Playwright;
 
 namespace Atlas.Print.Services;
@@ -43,6 +45,14 @@ public sealed class BrowserPool(ILogger<BrowserPool> logger) : IBrowserPool, IHo
 			Headless = true,
 			Args = _chromiumArgs
 		});
+
+		_browser.Disconnected += OnBrowserDisconnected;
+
+		_logger.LogInformation(
+			"BrowserPool|method:{Method}|browserVersion:{BrowserVersion}|connected:{Connected}",
+			nameof(StartAsync),
+			_browser.Version,
+			_browser.IsConnected);
 	}
 
 	/// <summary>
@@ -65,12 +75,30 @@ public sealed class BrowserPool(ILogger<BrowserPool> logger) : IBrowserPool, IHo
 			throw new InvalidOperationException("BrowserPool has not been initialised.");
 		}
 
+		if (!_browser.IsConnected)
+		{
+			_logger.LogError(
+				"BrowserPool|method:{Method}|reason:{Reason}",
+				nameof(AcquirePageAsync),
+				"BrowserNotConnected");
+		}
+
+		Stopwatch sw = Stopwatch.StartNew();
+		int contextsBefore = _browser.Contexts.Count;
+
 		// DeviceScaleFactor intentionally left unset (defaults to 1): an explicit
 		// scale factor here was forcing Chromium's PDF rasterizer to round hairline
 		// (1px) borders up, making them render visibly thicker than declared.
-		IBrowserContext context = await _browser.NewContextAsync();
+		IPage page = await _browser.NewPageAsync();
 
-		return await context.NewPageAsync();
+		_logger.LogDebug(
+			"BrowserPool|method:{Method}|contextsBefore:{ContextsBefore}|contextsAfter:{ContextsAfter}|elapsed:{Elapsed}ms",
+			nameof(AcquirePageAsync),
+			contextsBefore,
+			_browser.Contexts.Count,
+			sw.ElapsedMilliseconds);
+
+		return page;
 	}
 
 	/// <summary>
@@ -81,9 +109,20 @@ public sealed class BrowserPool(ILogger<BrowserPool> logger) : IBrowserPool, IHo
 	{
 		if (_browser is not null)
 		{
+			// Unsubscribe first: an intentional shutdown also raises Disconnected,
+			// which would otherwise log a false Critical on every clean stop.
+			_browser.Disconnected -= OnBrowserDisconnected;
 			await _browser.DisposeAsync();
 		}
 
 		_playwright?.Dispose();
+	}
+
+	private void OnBrowserDisconnected(object? sender, IBrowser browser)
+	{
+		_logger.LogCritical(
+			"BrowserPool|method:{Method}|reason:{Reason}",
+			nameof(OnBrowserDisconnected),
+			"BrowserDisconnected");
 	}
 }
