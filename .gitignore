@@ -365,3 +365,4 @@ FodyWeavers.xsd
 *.txt
 *.xlsx
 CLAUDE.md
+.github/copilot-instructions.md
